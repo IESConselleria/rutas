@@ -1,0 +1,586 @@
+<script> 
+///////// CONFIGURADOR /////////
+//Servidores
+var produccion = 'https://routing.openstreetmap.de/routed-car/route/v1';
+var desarrollo = 'https://router.project-osrm.org/route/v1';
+var servidor_en_ejecucion = desarrollo;
+var precio_km = 0.26;
+// Límites del callejero (representado dentro de la información de la interfaz)
+// [south, west], [north, east]
+var bounds = [[39.10, -0.85], [39.85, -0.09]];
+var server_timer= 5000; // miliseconds
+////////////////////////////////
+// --- INTERCEPTOR GLOBAL DE PETICIONES ---
+const originalFetch = window.fetch;
+window.fetch = function() {
+    return originalFetch.apply(this, arguments)
+    .then(async (response) => {
+        if (response.status === 429) {
+            Swal.fire({
+                icon: 'warning',
+                title: 'Demasiadas peticiones',
+                text: 'La API de mapas te ha bloqueado temporalmente por exceso de uso (Error 429).',
+                confirmButtonColor: '#547c84'
+            });
+        }
+        return response;
+    })
+    .catch(error => {
+        // Aquí capturamos específicamente el "Failed to fetch" de tus capturas
+        if (!Swal.isVisible()) {
+            Swal.fire({
+                icon: 'error',
+                title: 'Bloqueo de Seguridad',
+                html: 'EL navegador ha bloqueado las cabeceras CORS.',
+                confirmButtonColor: '#547c84'
+            });
+        }
+        throw error;
+    });
+};
+
+//////////////////////////////////////////
+</script>
+<!DOCTYPE html>
+<html lang="es">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Gestión de Rutas FEE - IES Conselleria</title>
+    
+    <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+    <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+    <link rel="stylesheet" href="https://unpkg.com/leaflet-routing-machine@latest/dist/leaflet-routing-machine.css" />
+    <script src="https://unpkg.com/leaflet-routing-machine@latest/dist/leaflet-routing-machine.js"></script>
+    <link rel="stylesheet" href="https://unpkg.com/leaflet-control-geocoder/dist/Control.Geocoder.css" />
+    <script src="https://unpkg.com/leaflet-control-geocoder/dist/Control.Geocoder.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/sweetalert2@11"></script>
+
+    <style>
+        body { margin: 0; font-family: 'Segoe UI', sans-serif; overflow: hidden;}
+        #map { height: 100vh; width: 100%; }
+        /* Panel de Control en Pantalla */
+        #ui-panel { position: absolute; bottom: 0px; z-index: 1000; }
+        #print{display: flex;text-align: left;background: white;border:1px solid gray;position:relative;border-top-right-radius: 1em;}
+        button { cursor: pointer; }
+        .precio-total { font-size: 1.3em; color: #2ecc71; font-weight: bold; }
+        .print-content{padding-top: 0.3em;padding-right: 0.5em;padding-left:5.2em}
+        .print-icon{  font-size: 4.5em;position:absolute;top: -32px; left: -3px;}
+        .delete{width:100%;background:#fde2e4;border:1px solid gray}
+        .popup{text-align: center;}
+        .iwrapper{position: absolute;z-index:1000;display: none;justify-content: center;align-items: center;}
+        .information-icon{  user-select: none; position: absolute; bottom: 0px; right: 0.02em; z-index: 10000;font-size: 3.2em; cursor: pointer; width: 1.2em; color: black; }
+        .info_viewbox{text-align: center;background:lightgreen;border:1px solid black;padding:0.2em;color:black;}
+        .info{background: lightgreen;color:black;padding:0.5em;border:1px solid lightgreen;text-align:center; font-size: 0.9em; height: -webkit-fill-available; width:19.8em;line-height: 1.3;}
+        .leaflet-control-geocoder-form{text-align: center;}
+        .leaflet-routing-container { display: none !important; }
+        .leaflet-popup-content{margin: 12px 16px 12px 16px;}
+        .leaflet-bottom leaflet-right{user-select: none;}
+
+        /* --- ESTILOS DE IMPRESIÓN --- */
+        #print-section { display: none; }
+        @media print {
+            @page { margin: 0; }
+            #page { display:none }
+            #print-section, #print-section * { visibility: visible; margin:0; padding:0;}
+            #print-section {  display: block; position: absolute; left: 0; top: 0; width: 97%; padding: 15px; background: white; color: black;height:auto }
+            table { width: 100%; border-collapse: collapse; margin-top: 20px; table-layout: fixed; }
+            th,td { border: 0.2em solid #000; text-align: left;  }
+            th { padding:0.5em !important; color:white; background-color: #5AAFBA !important;  -webkit-print-color-adjust: exact; print-color-adjust: exact; }
+            .print-header { margin-bottom: 20px; padding-bottom: 10px; text-align: center;}
+            /* Columna de sello: tamaño específico para el tampón */
+            .col-sello { width: 180px; height: 120px; text-align: center; font-size: 0.7em; color: #666; }
+            .footer-info { margin-top: 30px; font-size: 1.2em;  padding-top: 10px; }
+        }
+        /* Contenedor principal del buscador */
+        .leaflet-control-geocoder.leaflet-bar {  border: none !important;  box-shadow: 0 4px 15px rgba(0, 0, 0, 0.1) !important;  border-radius: 12px !important; overflow: hidden; background-color: #fdfdfd; }
+        /* El cuadro de texto donde escribes */
+        .leaflet-control-geocoder-form input { padding: 12px 15px !important; font-size: 14px !important;  border: none !important; outline: none !important; transition: background-color 0.3s ease; }
+        /* La lista de sugerencias que aparece debajo */
+        .leaflet-control-geocoder-alternatives { background-color: white !important; border-top: 1px solid #eee !important; list-style: none !important; padding: 0 !important; margin: 0 !important; }
+        /* Cada elemento de la lista de sugerencias */
+        .leaflet-control-geocoder-alternatives li { padding: 10px 15px !important; cursor: pointer !important; font-size: 13px !important; color: #666 !important; border-bottom: 1px solid #f9f9f9 !important; transition: all 0.2s ease;}
+        /* Al pasar el ratón por encima de una sugerencia (Hover) */
+        .leaflet-control-geocoder-alternatives li:hover,.leaflet-control-geocoder-selected { background-color: #fde2e4 !important; color: #d17a7a !important; }
+        input checkbox { margin: 0; padding: 0; box-sizing: border-box; }
+        h1 {  padding-top: 1.2em;  width: 60%; margin: 0 auto 0.7em; font-size: 1.5em; line-height: 1.3; text-align: center; color: #9398ac; text-shadow: 0 1px 2px rgba(0, 0, 0, 0.3);}
+        section {  margin: 0 auto;  padding: 0 0;  width: 100px;}
+        label.checkbox {  display: inline-block;  width: 130px;  padding: 3px 4px;  font-family: sans-serif;  overflow: hidden;  border-radius: 5px;  text-transform: uppercase;  font-size: 10px;  box-shadow: inset 0 0 0 1px rgba(0, 0, 0, 0.2);  background-color: #181d32;  color: white;}
+        label.checkbox input[type="checkbox"] {  display: none;}
+        label.checkbox .checkbox-switch {  display: block;}
+        .checkbox-switch-trigger {  display: block;  position: relative;  left: 0;  width: 21px;  height: 16px;  background-color: #515a81;  border-radius: 2px;  transition: left 150ms;}
+        input[type="checkbox"]:checked + .checkbox-switch-trigger {  left: 110px;}
+        .checkbox-switch-trigger::before, .checkbox-switch-trigger::after {  display: block;  text-align: center;  position: absolute;  top: 0.15em;  width: 37px;}
+        .checkbox-switch-trigger::before {  content: "No_volver_al_IES";  right: 420%; margin-top:2px}
+        .checkbox-switch-trigger::after {  content: "Volver_al_IES";  left: 115%;margin-top:2px}
+
+    
+    .loader {display: flex;
+    justify-content: center;
+    align-items: center;
+    background: white;
+    position: relative;
+    height:15vh ;
+border:5px solid;}
+    .arc {
+   width: 6vw;
+    height: 6vw;
+    border-radius: 50%;
+    border: 6px solid black;
+    border-top: 6px solid #547c84;/*#0f8b8d*/
+    border-right: 6px solid #547c84;/*#e9c8a2*/
+    opacity: 0.6;
+    animation: rotate 2.8s linear infinite;
+    z-index: 10;
+    margin-left: -11vw;}
+    .logo { position: absolute; top: 50%; left: 50%; width: 20.5vw; transform: translate(-50%, -50%); animation:  breathe 2.4s ease-in-out infinite; }
+
+    /* Animations */
+    @keyframes rotate {
+    100% { transform: rotate(360deg); }
+    }
+
+    @keyframes float {
+    0%, 100% { transform: translate(-50%, -50%) translateY(0); }
+    50% { transform: translate(-50%, -50%) translateY(-6px); }
+    }
+
+    @keyframes breathe {
+    0%, 100% { filter: drop-shadow(0 0 0px rgba(15,139,141,0.2)); }
+    50% { filter: drop-shadow(0 0 12px rgba(15,139,141,0.5)); }
+    }
+    </style>
+</head>
+<body>
+    <div id="page">
+        <div class="iwrapper">
+            <canvas id="izoom" width="55" height="85" ></canvas>
+            <div class="info" style="border-left:0px"> 🛈 Haz <u>zoom</u> en el mapa con estos controles, con las teclas + y - , o con la rueda del ratón </div>
+        </div>
+        <div class="iwrapper" style="right:0;flex-direction: column;"> 
+            <canvas id="isearch" width="300" height="65" ></canvas>
+            <div class="info" style="border-top:0px">  🛈 Escribe una <u>calle o ciudad</u> y pulsa intro. <br> Si es un resultado único aparecerá el marcador en el mapa. <br> Navega entre las sugerencias con el ratón o las flechas del teclado <br> Para cerrar las sugerencias pulsa escape estando en el recuadro de texto </div>
+        </div>
+        <div  style="position:absolute;top:1.2em;right:21em;z-index:1000;" >
+            <section>
+            <label class="checkbox">
+                <input id="vuelta" onchange="optimizarRuta();map.closePopup();" type="checkbox" id="checktest">
+                <span class="checkbox-switch-trigger" style="background: #547c84"></span>
+            </label>
+        </section>
+        </div>
+        <div class="iwrapper" style="bottom:0px;left:-3px;"> 
+            <canvas id="iprint" width="229" height="78" ></canvas>
+            <div class="info" style="border-left:0px;"> 🛈 <u>Imprime</u> la plantilla con las visitas y el espacio para el sello. </div>
+        </div>
+        <div class="iwrapper" style="bottom:15vh;width:100%;">
+        <div class="info_viewbox"> El área naranja representa los &nbsp<u>límites del callejero</u>&nbsp dentro de Valencia </div>
+        </div>
+        <div class="information-icon" onclick="toggleinfo()">🛈</div>
+        <div id="ui-panel" class="noPrint">
+            <button id ="print" onclick="optimizarRuta(); routingControl.setWaypoints(routeData.locations); ">
+                <div class="print-icon">🖨️</div>
+                <div class="print-content">
+                    Distancia: <b><span id="distancia">0</span> km</b><br>
+                    <!-- CAMBIAMOS EL PRECIO KM DIRECTAMENTE AQUÍ --> 
+                    Coste (<span id="precio_km">configuración.precio_km</span>€/km): <span id="precio" class="precio-total">0</span>€
+                </div>
+            </button>
+        </div>
+        <div id="map"></div>
+    </div> <!--end page-->
+    <div id="print-section">
+        <div class="print-header">
+            <img src="https://portal.edu.gva.es/46022257/wp-content/uploads/sites/831/2023/10/logos-2023-1.png" alt="">
+            <h3>Gestión de Rutas FEE - IES Conselleria</h3><br>
+            <p id="print-date"></p><br>
+        </div>
+        <table>
+            <thead>
+                <tr>
+                    <th style="width: 40px;">Nº</th>
+                    <th>Dirección de la Visita</th>
+                    <th style="width: 180px;">Sello Empresa</th>
+                </tr>
+            </thead>
+            <tbody id="print-table-body">
+            </tbody>
+        </table><br><hr><br>
+        <div class="footer-info">
+            <p><strong>Distancia Total Recorrida:</strong> <span id="p-dist"></span> km</p>
+            <p><strong>Importe Total del Servicio:</strong> <span id="p-precio"></span> €</p>
+        </div><br><hr><br>
+        <div style="display: flex;width:100%;justify-content: end;align-items: end;">
+            <div style="width:25em;">Nombre:</div><div style="width:25em">Firma:</div>
+        </div>
+    </div>
+</body>
+</html>
+<script>
+    
+    // Datos de ruta
+    var routeData = { locations: [L.latLng(39.485209,  -0.393131)], names: ["Institut d'Educació Secundària Conselleria"] };
+    var map = L.map('map').setView([39.485209, -0.393131], 11); // Centro y Zoom
+    L.tileLayer('https://{s}.basemaps.cartocdn.com/rastertiles/voyager/{z}/{x}/{y}{r}.png').addTo(map);
+    var valenciaGeocoder = L.Control.Geocoder.nominatim({
+        collapsed: false,
+        geocodingQueryParams: {
+            countrycodes: 'es',
+            // var bounds = [[39.30, -0.7], [39.70, -0.19]];
+            viewbox: bounds[0][1]+','+bounds[0][0]+','+bounds[1][1]+','+bounds[1][0],
+            // viewbox: '-0.55,39.30,-0.25,39.60',
+            bounded: 1
+        }
+    });
+
+    // Define the custom icon
+    var customIcon = L.icon({
+        iconUrl: 'https://portal.edu.gva.es/46022257/wp-content/uploads/sites/831/2026/03/logo_IES_Conselleria.webp', // Example URL
+        iconSize: [100, 30],
+        iconAnchor: [20, 0],
+        popupAnchor: [0, 0]
+    });
+
+     
+
+    var routingControl = L.Routing.control({
+        waypoints: routeData.locations,
+        router: L.Routing.osrmv1({ 
+            serviceUrl: servidor_en_ejecucion,
+            useHints: false,
+            timeout: 5000 // 1 segundos de margen
+        }),
+        
+        fitSelectedRoutes: true,
+        routeOptions: { padding: [80, 80] },
+        plan: L.Routing.plan(routeData.locations, {
+            geocoder: valenciaGeocoder,
+            createMarker: function(i, wp) {
+                var name = routeData.names[i] || "Parada " + i;
+                
+                
+                setMarker(wp.latLng, i)
+               
+                // Apply the icon here --------------------------v
+                // var marker = L.marker(wp.latLng, markerOptions)
+                //     marker.bindPopup('<div class="popup">' + name.split(',')[0] + '</div>' +
+                //             '<button class="delete" onclick="Delete(' + wp.latLng.lat + ',' + wp.latLng.lng + ')">Eliminar</button>');
+
+                //setTimeout(() => marker.openPopup(), 250);
+                
+            }
+        }),
+        lineOptions: {
+            styles: [
+                // Sombra o borde exterior (Blanco pastel para dar relieve)
+                {color: 'white', opacity: 0.9, weight: 12}, 
+                // Línea principal (Azul pastel suave)
+                {color: '#A2D2FF', opacity: 1, weight: 6}
+            ],
+            addWaypoints: false // Evita que se creen puntos extra al pinchar la línea
+        }
+    }).addTo(map);
+
+    L.Control.geocoder({
+    geocoder: valenciaGeocoder,
+    defaultMarkGeocode: false,
+    placeholder: "Escribe una dirección...",
+    collapsed: false,
+    iconLabel: '🔍'
+    }).on('markgeocode', function(e) {
+        // 1. Obtener la nueva ubicación
+        var nuevaUbicacion = e.geocode.center;
+        // 2. Verificar si ya existe en routeData.locations
+        // Usamos .some() y el método .equals() de Leaflet para comparar coordenadas
+        var yaExiste = routeData.locations.some(function(loc) {
+            return loc.equals(nuevaUbicacion);
+        });
+        if (yaExiste) {
+            alert("Esta ubicación ya está en tu ruta.");
+        } else {
+            // 3. Si no existe, lo añadimos
+            routeData.locations.push(nuevaUbicacion);
+            routeData.names.push(e.geocode.name);
+            optimizarRuta();
+        }
+        document.querySelector('.leaflet-control-geocoder-form input').select();
+    }).addTo(map);
+    // 2. Use a tiny delay to ensure the DOM has rendered the input
+    setTimeout(() => {
+        const input = document.querySelector('.leaflet-control-geocoder-form input');
+        if (input) {
+            input.focus();
+            // Optional: if there's already text, this selects it for easy overtyping
+            input.select(); 
+        }
+    }, 100);
+
+    
+    var tableBody = document.getElementById('print-table-body');
+
+    routingControl.on('waypointschanged', function(e) { 
+        // Reseteamos la vista de impresión porque con un único punto no se dispara routesfound
+        tableBody.innerHTML = ""; 
+        document.getElementById('distancia').innerText = 0;
+        document.getElementById('precio').innerText = 0;
+        document.getElementById('p-dist').innerText = 0;
+        document.getElementById('p-precio').innerText = 0;
+    })
+
+
+    // Actualizar tabla de impresión y cálculos
+    routingControl.on('routesfound', function(e) {
+
+        map.closePopup();
+        
+        var legs = ['Origen']
+        var route = e.routes[0];
+        var legDistance = 0;
+        var legIndex = 1;
+        route.instructions.forEach(function(instr) {
+            legDistance += instr.distance; 
+            // If we reached a waypoint (or it's the final destination)
+            if (instr.type === 'WaypointReached' || instr.type === 'DestinationReached') {
+                // console.log('Leg ' + legIndex + ' Distance: ' + (legDistance / 1000).toFixed(2) + ' km');
+                legs[legIndex] = (legDistance / 1000).toFixed(2);
+                legDistance = 0; // Reset for next leg
+                legIndex++;
+            }
+        });
+        // console.log(legs)
+        var summary = e.routes[0].summary;
+        // console.log(e.routes[0].summary)
+        var km = (summary.totalDistance / 1000).toFixed(2);
+        // Actualizar UI
+        document.getElementById('distancia').innerText = km;
+        document.getElementById('precio').innerText = (document.getElementById('precio_km').innerText*km).toFixed(2);
+        document.getElementById('p-dist').innerText = km;
+        document.getElementById('p-precio').innerText = (document.getElementById('precio_km').innerText*km).toFixed(2);
+        document.getElementById('print-date').innerText = "Fecha: " + new Date().toLocaleString();
+        // Generar filas de la tabla con espacio para SELLO
+        
+        tableBody.innerHTML = "";
+        routeData.names.forEach((name, index) => {
+            var kmLabel = (index === 0) ? "Punto de Inicio" : legs[index] + " km";
+            tableBody.innerHTML += `
+                <tr>
+                    <td style="padding:0.5em;">${index + 1}</td>
+                    <td style="padding:0.5em;">${name}<div style="font-size: 0.8em; color: #555;">Distancia recorrida desde el anterior punto : ${kmLabel}</div></td>
+                    <td style="padding:0.5em;" class="col-sello">ESPACIO SELLO</td>
+                </tr>`;
+        });
+        
+        pregunta_imprimir()
+          
+    });
+
+    // Create and add the rectangle (polygon) to the map
+    var viewbox = L.rectangle(bounds, {
+        color: "#ff7800", 
+        weight: 2, 
+        fillOpacity: 0.2
+    })
+    .addTo(map); map.removeLayer(viewbox);// Para ver la viewbox con limitaciones en el callejero
+    
+    function deleteMarkerByCoords(lat, lng) {
+        map.eachLayer(function (layer) {
+            // Check if the layer is a marker
+            if (layer instanceof L.Marker) {
+                const pos = layer.getLatLng();
+                // Compare coordinates (using a small epsilon for precision if needed)
+                if (pos.lat === lat && pos.lng === lng) {
+                    map.removeLayer(layer);
+                }
+            }
+        });
+    }
+
+    var resultado  =false
+    function pregunta_imprimir(){
+        
+        Swal.fire({
+        title: "¿Quieres Imprimir o ver la ruta?",
+        showDenyButton: true,
+        showCancelButton: false,
+        confirmButtonText: "Imprimir directamente",
+        confirmButtonColor: "grey",
+        denyButtonText: `Ver la ruta`,
+        denyButtonColor:"#A2D2FF",
+        didClose: () => {
+            console.log("La alerta se ha cerrado por completo");
+            // Aquí va la lógica que quieres ejecutar siempre al cerrar
+            if (resultado) { window.print();resultado = false;}
+        }
+        }).then((result) => {
+            /* Read more about isConfirmed, isDenied below */
+            if (result.isConfirmed) resultado = true
+            else {resultado = false}
+        });
+    }
+    function Delete(lat,lng){
+        // console.log('locations',routeData.locations)
+        // console.log('latlng', lat + ' - '+lng)
+        // 1. Define the point you are looking for
+        let target = L.latLng(lat, lng);
+        // Use findIndex with Leaflet's built-in comparison
+        let index = routeData.locations.findIndex(loc => loc.equals(target));
+
+        if (index !== -1) {
+            console.log("Match found at index:", index);
+        } else {
+            console.log("No match found.");
+        }
+        
+        if (index > -1) { // only splice array when item is found
+            console.log('deleting...')
+            routeData.locations.splice(index, 1)
+            routeData.names.splice(index, 1)
+        }else {
+            // console.log('no encontrado')
+        }  
+        deleteMarkerByCoords(lat, lng)  
+        
+        optimizarRuta()
+        //routingControl.setWaypoints(routeData.locations);
+        document.querySelector('.leaflet-control-geocoder-form input').select()
+    }
+
+    function toggleinfo(){
+        // 1. Grab all elements once
+        const wrappers = document.querySelectorAll('.iwrapper');
+
+        if (wrappers.length > 0) {
+            // 2. Check the display state of the first element to determine the toggle direction
+            const isHidden = wrappers[0].style.display === 'none' || wrappers[0].style.display === '';
+            const newDisplay = isHidden ? 'flex' : 'none';
+
+            // 3. Apply the new state to all elements
+            wrappers.forEach(element => {
+                element.style.display = newDisplay;
+                switch (newDisplay){
+                    case 'none':
+                        map.removeLayer(viewbox)
+                        break;
+                    case 'flex':
+                        viewbox.addTo(map)
+                        break;    
+                }
+            });
+        }
+    }
+
+    
+
+    var marcador
+    function optimizarRuta() {
+        // if (routeData.locations.length < 2) return;
+
+        map.eachLayer(function (layer) {
+            if (layer instanceof L.Marker) {
+                map.removeLayer(layer);
+            }
+        });
+
+        routeData.locations.forEach((element, i) => { setMarker(element, i)});
+
+        // 0. Extraemos la vuelta si está desmarcada y existe, independientemente de la posición (Excluyendo el origen)y extraemos aquí los markadores eliminados
+        console.log(routeData.locations)
+        let index  = routeData.locations.findIndex((loc, i) => loc.equals(L.latLng(39.485209, -0.393131)) && i!=0 )
+        // console.log('index', index )
+        if (index != -1){
+            routeData.locations.splice(index, 1)
+            routeData.names.splice(index, 1)
+        }
+        // 1. Guardamos el origen (IES Conselleria)
+        const origen = routeData.locations[0];
+        const nombreOrigen = routeData.names[0];
+
+        let puntosAOptimizar = [];
+        for (let i = 1; i < routeData.locations.length; i++) {
+            puntosAOptimizar.push({
+                loc: routeData.locations[i],
+                name: routeData.names[i]
+            });
+        }
+
+        let rutaOptimizada = [origen];
+        let nombresOptimizado = [nombreOrigen];
+        let puntoActual = origen;
+
+        // 2. Algoritmo de Vecino Más Cercano
+        while (puntosAOptimizar.length > 0) {
+            let indiceCercano = -1;
+            let distanciaMinima = Infinity;
+
+            for (let i = 0; i < puntosAOptimizar.length; i++) {
+                let d = puntoActual.distanceTo(puntosAOptimizar[i].loc);
+                if (d < distanciaMinima) {
+                    distanciaMinima = d;
+                    indiceCercano = i;
+                }
+            }
+
+            let proximoPunto = puntosAOptimizar.splice(indiceCercano, 1)[0];
+            rutaOptimizada.push(proximoPunto.loc);
+            nombresOptimizado.push(proximoPunto.name);
+            puntoActual = proximoPunto.loc;
+        }
+
+        // --- EL CAMBIO CLAVE AQUÍ ---
+        // 3. Añadimos el origen otra vez al final para cerrar la ruta
+        // console.log('checked',document.getElementById('vuelta').checked)
+            if (document.getElementById('vuelta').checked && routeData.locations.length > 1){
+                // console.log('checked!!')
+                rutaOptimizada.push(origen);
+                nombresOptimizado.push(nombreOrigen + " (Vuelta)");
+            }
+
+        // Actualizar datos globales
+        routeData.locations = rutaOptimizada;
+        routeData.names = nombresOptimizado;
+
+   
+        
+        // map.closePopup();
+        // marcador.openPopup()
+        // routingControl.setWaypoints(routeData.locations);  
+
+    }
+
+    function setMarker(element, i){
+        console.log(element)
+        
+        name = routeData.names[i] || "Parada " + i;
+       
+        markerOptions = (element.equals(L.latLng(39.485209,  -0.393131))) ? { icon: customIcon } : {}
+
+       
+            marcador = L.marker([element.lat, element.lng], markerOptions).addTo(map).bindPopup('<div class="popup">' + name.split(',')[0] + '</div>' +
+                        '<button class="delete" onclick="Delete(' + element.lat + ',' + element.lng + ')">Eliminar</button>').openPopup() 
+                            
+        return marcador;    
+
+    }
+
+    function draw(canvas , ancho, alto){
+            const ctx = canvas.getContext("2d");
+            // Outline a blue rectangle: strokeRect(x, y, width, height)
+            ctx.strokeStyle = "lightgreen";
+            ctx.lineWidth = 8;
+            ctx.strokeRect(0,0, ancho, alto);      
+    }
+    draw(document.getElementById("izoom"), 55, 85)
+    draw(document.getElementById("isearch"), 300, 65)
+    draw(document.getElementById("iprint"), 229, 78)
+    /////////////////////////////////////////////////////////////////
+
+    document.getElementById('precio_km').innerHTML = precio_km
+      
+
+    document.addEventListener('keydown', (event) => {
+        // console.log(`Key pressed: ${event.key}`);
+        // console.log(`Key code: ${event.code}`);
+        if (event.code == 'ControlLeft' && routeData.locations.length > 1){optimizarRuta(); routingControl.setWaypoints(routeData.locations);}
+    });
+     
+</script>
